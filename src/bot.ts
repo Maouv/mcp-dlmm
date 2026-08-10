@@ -1,9 +1,10 @@
 import "dotenv/config";
-import { Bot, InlineKeyboard } from "grammy";
+import { Bot, InlineKeyboard, InputFile } from "grammy";
 import { PublicKey } from "@solana/web3.js";
 import { setWalletKey, getWallet, getConnection } from "./wallet";
 import * as met from "./meteora";
 import * as jup from "./jupiter";
+import { renderChartPNG, ChartParams, BinData, OHLCV } from "./chart";
 
 const bot = new Bot(process.env.BOT_TOKEN!);
 const PASSWORD = process.env.BOT_PASSWORD || "Freyana";
@@ -16,6 +17,23 @@ const awaitingWallet = new Set<number>();
 
 const awaitingPoolToken = new Set<number>();
 
+interface AddLPState {
+  poolAddr: string;
+  poolName: string;
+  binStep: number;
+  activeBinId: number;
+  activePrice: number;
+  bins: BinData[];
+  ohlcv: OHLCV[];
+  minPct: number;
+  maxPct: number;
+  timeframe: string;
+}
+const addLPStates = new Map<number, AddLPState>();
+const awaitingMinPct = new Set<number>();
+const awaitingMaxPct = new Set<number>();
+const awaitingAmounts = new Set<number>();
+
 function isAuthed(userId: number): boolean {
   return authed.has(userId);
 }
@@ -24,8 +42,8 @@ function mainMenu(): InlineKeyboard {
   return new InlineKeyboard()
     .text("Pools", "pools").text("Positions", "positions").row()
     .text("Withdraw", "withdraw").text("Swap", "swap").row()
-    .text("Pool Info", "poolinfo").text("Wallet", "walletinfo").row()
-    .text("Set Wallet", "setwallet");
+    .text("Add LP", "addlp").text("Pool Info", "poolinfo").row()
+    .text("Wallet", "walletinfo").text("Set Wallet", "setwallet");
 }
 
 function fmtAddr(addr: string, len = 6): string {
@@ -100,6 +118,42 @@ bot.on("message:text", async (ctx) => {
     }
     return;
   }
+  if (awaitingMinPct.has(uid)) {
+    const val = parseFloat(ctx.message.text.trim());
+    awaitingMinPct.delete(uid);
+    if (isNaN(val)) { await ctx.reply("Invalid number."); return; }
+    const state = addLPStates.get(uid);
+    if (!state) { await ctx.reply("Session expired. Start over.", { reply_markup: mainMenu() }); return; }
+    state.minPct = val;
+    await ctx.reply(`Min range set: ${val}%\nRange: ${state.minPct}% to ${state.maxPct}%\nClick Refresh Chart to update image.`);
+    return;
+  }
+  if (awaitingMaxPct.has(uid)) {
+    const val = parseFloat(ctx.message.text.trim());
+    awaitingMaxPct.delete(uid);
+    if (isNaN(val)) { await ctx.reply("Invalid number."); return; }
+    const state = addLPStates.get(uid);
+    if (!state) { await ctx.reply("Session expired. Start over.", { reply_markup: mainMenu() }); return; }
+    state.maxPct = val;
+    await ctx.reply(`Max range set: ${val}%\nRange: ${state.minPct}% to ${state.maxPct}%\nClick Refresh Chart to update image.`);
+    return;
+  }
+  if (awaitingAmounts.has(uid)) {
+    const parts = ctx.message.text.trim().split(/\s+/);
+    awaitingAmounts.delete(uid);
+    if (parts.length < 2) { await ctx.reply("Send 2 numbers: amountX amountY"); return; }
+    const amtX = parts[0];
+    const amtY = parts[1];
+    const state = addLPStates.get(uid);
+    if (!state) { await ctx.reply("Session expired. Start over.", { reply_markup: mainMenu() }); return; }
+    const kb = new InlineKeyboard()
+      .text("Spot", `addlpexec:${state.poolAddr}:spot:${amtX}:${amtY}:${state.minPct}:${state.maxPct}`)
+      .text("Curve", `addlpexec:${state.poolAddr}:curve:${amtX}:${amtY}:${state.minPct}:${state.maxPct}`).row()
+      .text("Bid-Ask", `addlpexec:${state.poolAddr}:bidask:${amtX}:${amtY}:${state.minPct}:${state.maxPct}`)
+      .text("Cancel", "menu");
+    await ctx.reply(`Pool: ${state.poolName}\nAmount X: ${amtX}\nAmount Y: ${amtY}\nRange: ${state.minPct}% to ${state.maxPct}%\n\nSelect strategy:`, { reply_markup: kb });
+    return;
+  }
 });
 
 bot.callbackQuery("setwallet", async (ctx) => {
@@ -170,7 +224,7 @@ bot.callbackQuery(/^pool:(.+)$/, async (ctx) => {
     const kb = new InlineKeyboard()
       .text("Bins", `bins:${addr}`).text("Quote", `quote:${addr}`).row()
       .text("OHLCV", `ohlcv:${addr}`).text("Volume", `volume:${addr}`).row()
-      .text("Add Liq", `addliq:${addr}`).text("Swap", `swapdlmm:${addr}`).row()
+      .text("Add LP", `addlpchart:${addr}`).text("Swap", `swapdlmm:${addr}`).row()
       .text("Back", "pools");
     const msg = `Pool: ${pool?.name || fmtAddr(addr)}\nBin: ${activeBin.binId}\nPrice: ${activeBin.price}\nBase Fee: ${fees.baseFeePct}%\nDyn Fee: ${fees.dynamicFeePct}%`;
     await ctx.editMessageText(msg, { reply_markup: kb });
@@ -411,6 +465,174 @@ bot.callbackQuery("menu", async (ctx) => {
   await ctx.editMessageText("Menu:", { reply_markup: mainMenu() });
 });
 
+bot.callbackQuery("addlp", async (ctx) => {
+  if (!isAuthed(ctx.from!.id)) return;
+  await ctx.answerCallbackQuery();
+  awaitingPoolToken.add(ctx.from!.id);
+  await ctx.editMessageText("Send token contract address to add LP:");
+});
+
+bot.callbackQuery(/^addlpchart:(.+)$/, async (ctx) => {
+  if (!isAuthed(ctx.from!.id)) return;
+  await ctx.answerCallbackQuery();
+  const poolAddr = ctx.match![1];
+  const uid = ctx.from!.id;
+  try {
+    await ctx.editMessageText("Loading chart...");
+    const pool: any = await met.getPool(poolAddr);
+    const poolName = pool?.name || fmtAddr(poolAddr, 8);
+    const binStep = pool?.pool_config?.bin_step || 1;
+    const activePrice = pool?.current_price || 0;
+    const activeBin = await met.getActiveBin(poolAddr);
+    const rawBins = await met.getBinsAroundActive(poolAddr, 60, 60);
+    const bins: BinData[] = (rawBins as any[]).map((b: any) => ({
+      binId: b.binId,
+      price: b.price,
+      xAmount: parseFloat(b.xAmount) || 0,
+      yAmount: parseFloat(b.yAmount) || 0,
+    }));
+    const ohlcvRaw = await met.getPoolOhlcv(poolAddr, "1H", 48);
+    const ohlcv: OHLCV[] = ((ohlcvRaw as any)?.data || ohlcvRaw || []).map((c: any) => ({
+      timestamp: c.timestamp || 0,
+      open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume || 0,
+    })).filter((c: OHLCV) => c.open != null);
+
+    addLPStates.set(uid, {
+      poolAddr, poolName, binStep,
+      activeBinId: activeBin.binId,
+      activePrice, bins, ohlcv,
+      minPct: -20, maxPct: 20, timeframe: "1H",
+    });
+
+    const state = addLPStates.get(uid)!;
+    const png = await renderChartPNG({
+      poolName: state.poolName, binStep: state.binStep,
+      activeBinId: state.activeBinId, activePrice: state.activePrice,
+      bins: state.bins, ohlcv: state.ohlcv,
+      minPct: state.minPct, maxPct: state.maxPct, timeframe: state.timeframe,
+    });
+
+    const kb = new InlineKeyboard()
+      .text("Reset", "addlpreset").text("Refresh", "addlprefresh").text("Timeframe", "addlptimeframe").row()
+      .text("Min Range", "addlpmin").text("Max Range", "addlpmax").text("Confirm", "addlpconfirm");
+
+    await ctx.api.sendPhoto(ctx.chat!.id, new InputFile(png), {
+      caption: `${state.poolName} ${state.binStep}/${pool?.pool_config?.base_fee_pct ?? "?"}\nActive: $${state.activePrice.toExponential(3)}\nRange: ${state.minPct}% to ${state.maxPct}%\nTimeframe: ${state.timeframe}`,
+      reply_markup: kb,
+    });
+  } catch (e: any) {
+    await ctx.editMessageText(`Error: ${e.message}`, { reply_markup: mainMenu() });
+  }
+});
+
+bot.callbackQuery("addlpreset", async (ctx) => {
+  if (!isAuthed(ctx.from!.id)) return;
+  await ctx.answerCallbackQuery();
+  const uid = ctx.from!.id;
+  const state = addLPStates.get(uid);
+  if (!state) return;
+  state.minPct = -20;
+  state.maxPct = 20;
+  await ctx.editMessageCaption({ caption: `${state.poolName} ${state.binStep}\nActive: $${state.activePrice.toExponential(3)}\nRange: ${state.minPct}% to ${state.maxPct}%\nTimeframe: ${state.timeframe}` });
+});
+
+bot.callbackQuery("addlprefresh", async (ctx) => {
+  if (!isAuthed(ctx.from!.id)) return;
+  await ctx.answerCallbackQuery();
+  const uid = ctx.from!.id;
+  const state = addLPStates.get(uid);
+  if (!state) return;
+  try {
+    const png = await renderChartPNG({
+      poolName: state.poolName, binStep: state.binStep,
+      activeBinId: state.activeBinId, activePrice: state.activePrice,
+      bins: state.bins, ohlcv: state.ohlcv,
+      minPct: state.minPct, maxPct: state.maxPct, timeframe: state.timeframe,
+    });
+    const kb = new InlineKeyboard()
+      .text("Reset", "addlpreset").text("Refresh", "addlprefresh").text("Timeframe", "addlptimeframe").row()
+      .text("Min Range", "addlpmin").text("Max Range", "addlpmax").text("Confirm", "addlpconfirm");
+    await ctx.editMessageMedia({ type: "photo", media: new InputFile(png), caption: `${state.poolName} ${state.binStep}\nActive: $${state.activePrice.toExponential(3)}\nRange: ${state.minPct}% to ${state.maxPct}%\nTimeframe: ${state.timeframe}` }, {
+      reply_markup: kb,
+    });
+  } catch (e: any) {
+    await ctx.answerCallbackQuery({ text: `Error: ${e.message}` });
+  }
+});
+
+bot.callbackQuery("addlptimeframe", async (ctx) => {
+  if (!isAuthed(ctx.from!.id)) return;
+  await ctx.answerCallbackQuery();
+  const kb = new InlineKeyboard()
+    .text("5m", "addlptf:5m").text("1H", "addlptf:1H").row()
+    .text("4H", "addlptf:4H").text("1D", "addlptf:1D").row()
+    .text("Back", "addlpchartback");
+  await ctx.editMessageReplyMarkup({ reply_markup: kb });
+});
+
+bot.callbackQuery(/^addlptf:(.+)$/, async (ctx) => {
+  if (!isAuthed(ctx.from!.id)) return;
+  await ctx.answerCallbackQuery();
+  const tf = ctx.match![1];
+  const uid = ctx.from!.id;
+  const state = addLPStates.get(uid);
+  if (!state) return;
+  state.timeframe = tf;
+  const ohlcvRaw = await met.getPoolOhlcv(state.poolAddr, tf, 48);
+  state.ohlcv = ((ohlcvRaw as any)?.data || ohlcvRaw || []).map((c: any) => ({
+    timestamp: c.timestamp || 0,
+    open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume || 0,
+  })).filter((c: OHLCV) => c.open != null);
+  const png = await renderChartPNG({
+    poolName: state.poolName, binStep: state.binStep,
+    activeBinId: state.activeBinId, activePrice: state.activePrice,
+    bins: state.bins, ohlcv: state.ohlcv,
+    minPct: state.minPct, maxPct: state.maxPct, timeframe: state.timeframe,
+  });
+  const kb = new InlineKeyboard()
+    .text("Reset", "addlpreset").text("Refresh", "addlprefresh").text("Timeframe", "addlptimeframe").row()
+    .text("Min Range", "addlpmin").text("Max Range", "addlpmax").text("Confirm", "addlpconfirm");
+  await ctx.editMessageMedia({ type: "photo", media: new InputFile(png), caption: `${state.poolName} ${state.binStep}\nActive: $${state.activePrice.toExponential(3)}\nRange: ${state.minPct}% to ${state.maxPct}%\nTimeframe: ${state.timeframe}` }, {
+    reply_markup: kb,
+  });
+});
+
+bot.callbackQuery("addlpchartback", async (ctx) => {
+  if (!isAuthed(ctx.from!.id)) return;
+  await ctx.answerCallbackQuery();
+  const uid = ctx.from!.id;
+  const state = addLPStates.get(uid);
+  if (!state) return;
+  const kb = new InlineKeyboard()
+    .text("Reset", "addlpreset").text("Refresh", "addlprefresh").text("Timeframe", "addlptimeframe").row()
+    .text("Min Range", "addlpmin").text("Max Range", "addlpmax").text("Confirm", "addlpconfirm");
+  await ctx.editMessageReplyMarkup({ reply_markup: kb });
+});
+
+bot.callbackQuery("addlpmin", async (ctx) => {
+  if (!isAuthed(ctx.from!.id)) return;
+  await ctx.answerCallbackQuery();
+  awaitingMinPct.add(ctx.from!.id);
+  await ctx.reply("Send min % (e.g. -20, -15.5):");
+});
+
+bot.callbackQuery("addlpmax", async (ctx) => {
+  if (!isAuthed(ctx.from!.id)) return;
+  await ctx.answerCallbackQuery();
+  awaitingMaxPct.add(ctx.from!.id);
+  await ctx.reply("Send max % (e.g. 20, 50.5):");
+});
+
+bot.callbackQuery("addlpconfirm", async (ctx) => {
+  if (!isAuthed(ctx.from!.id)) return;
+  await ctx.answerCallbackQuery();
+  const uid = ctx.from!.id;
+  const state = addLPStates.get(uid);
+  if (!state) return;
+  awaitingAmounts.add(uid);
+  await ctx.reply(`Pool: ${state.poolName}\nRange: ${state.minPct}% to ${state.maxPct}%\n\nSend amount X and Y (e.g. 0.5 100):`);
+});
+
 bot.callbackQuery("poolinfo", async (ctx) => {
   if (!isAuthed(ctx.from!.id)) return;
   await ctx.answerCallbackQuery();
@@ -509,6 +731,27 @@ bot.command("quote", async (ctx) => {
     await ctx.reply(`In: ${q.inAmount}\nOut: ${q.outAmount}\nFee: ${q.feeBps} bps\nParts: ${q.parts}`);
   } catch (e: any) {
     await ctx.reply(`Error: ${e.message}`);
+  }
+});
+
+bot.callbackQuery(/^addlpexec:(.+):(.+):(.+):(.+):(-?[\d.]+):(-?[\d.]+)$/, async (ctx) => {
+  if (!isAuthed(ctx.from!.id)) return;
+  await ctx.answerCallbackQuery();
+  const poolAddr = ctx.match![1];
+  const strategy = ctx.match![2];
+  const amtX = ctx.match![3];
+  const amtY = ctx.match![4];
+  const minPct = parseFloat(ctx.match![5]);
+  const maxPct = parseFloat(ctx.match![6]);
+  const strategyMap: Record<string, number> = { spot: 0, curve: 1, bidask: 2 };
+  const strategyType = strategyMap[strategy] ?? 0;
+  try {
+    await ctx.reply("Adding liquidity...");
+    const result = await met.addLiquidity(poolAddr, amtX, amtY, Math.round(minPct * 100), Math.round(maxPct * 100));
+    await ctx.reply(`Liquidity added.\nPosition: ${result.positionAddress}\n${txLink(result.sig)}`, { reply_markup: mainMenu() });
+    addLPStates.delete(ctx.from!.id);
+  } catch (e: any) {
+    await ctx.reply(`Error: ${e.message}`, { reply_markup: mainMenu() });
   }
 });
 
