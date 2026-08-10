@@ -19,6 +19,34 @@ export async function searchPools(query?: string, limit = 10) {
   return res.json();
 }
 
+export async function searchPoolsByToken(tokenMint: string): Promise<any[]> {
+  const params = new URLSearchParams({ page: "1", page_size: "20", sort_by: "liquidity:desc", query: tokenMint });
+  const res = await fetch(`${DATAPI}/pools?${params}`);
+  if (!res.ok) throw new Error(`Datapi error: ${res.status}`);
+  const data: any = await res.json();
+  return data?.data || [];
+}
+
+export function formatPoolList(pools: any[]): string {
+  if (pools.length === 0) return "No pools found.";
+  const lines: string[] = [];
+  for (let i = 0; i < pools.length; i++) {
+    const p = pools[i];
+    const name = p.name || "unknown";
+    const binStep = p.pool_config?.bin_step || "?";
+    const baseFee = p.pool_config?.base_fee_pct ?? "?";
+    const tvl = p.tvl ? `$${p.tvl.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : "$0";
+    const vol5m = p.volume?.["30m"] ? `$${p.volume["30m"].toLocaleString(undefined, { maximumFractionDigits: 0 })}` : "$0";
+    const vol24h = p.volume?.["24h"] ? `$${p.volume["24h"].toLocaleString(undefined, { maximumFractionDigits: 0 })}` : "$0";
+    const liq = p.tvl ? `$${(p.tvl / 1000).toFixed(1)}K` : "$0";
+    const link = `https://app.meteora.ag/dlmm/${p.address}?referral_code=METIDN`;
+    const num = i + 1;
+    lines.push(`${num}. [${name} ${binStep}/${baseFee}](${link})`);
+    lines.push(`   TVL: ${tvl} | Vol 5m: ${vol5m} | Vol 24h: ${vol24h} | LIQ: ${liq}`);
+  }
+  return lines.join("\n");
+}
+
 export async function getPool(poolAddress: string) {
   const res = await fetch(`${DATAPI}/pools/${poolAddress}`);
   return res.json();

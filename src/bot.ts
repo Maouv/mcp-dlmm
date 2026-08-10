@@ -14,6 +14,8 @@ const authed = new Set<number>();
 const awaitingPassword = new Set<number>();
 const awaitingWallet = new Set<number>();
 
+const awaitingPoolToken = new Set<number>();
+
 function isAuthed(userId: number): boolean {
   return authed.has(userId);
 }
@@ -64,6 +66,37 @@ bot.on("message:text", async (ctx) => {
       await ctx.reply(`Wallet: ${fmtAddr(kp!.publicKey.toBase58(), 8)}`, { reply_markup: mainMenu() });
     } else {
       await ctx.reply(result.error || "Invalid key.", { reply_markup: mainMenu() });
+    }
+    return;
+  }
+  if (awaitingPoolToken.has(uid)) {
+    const tokenMint = ctx.message.text.trim();
+    awaitingPoolToken.delete(uid);
+    try { await ctx.deleteMessage(); } catch {}
+    if (tokenMint.length < 32 || tokenMint.length > 44) {
+      await ctx.reply("Invalid token address.", { reply_markup: mainMenu() });
+      return;
+    }
+    try {
+      const pools = await met.searchPoolsByToken(tokenMint);
+      if (pools.length === 0) {
+        await ctx.reply("No pools found for this token.", { reply_markup: mainMenu() });
+        return;
+      }
+      const tokenSymbol = pools[0].token_x?.address === tokenMint ? pools[0].token_x?.symbol : pools[0].token_y?.symbol;
+      const tokenName = pools[0].token_x?.address === tokenMint ? pools[0].token_x?.name : pools[0].token_y?.name;
+      const totalTvl = pools.reduce((sum: number, p: any) => sum + (p.tvl || 0), 0);
+      const totalVol24h = pools.reduce((sum: number, p: any) => sum + (p.volume?.["24h"] || 0), 0);
+      const header = `CA: ${tokenMint}\nToken: ${tokenName} (${tokenSymbol})\nPools: ${pools.length}\nTotal TVL: $${totalTvl.toLocaleString(undefined, { maximumFractionDigits: 0 })}\nVol 24h: $${totalVol24h.toLocaleString(undefined, { maximumFractionDigits: 0 })}\n`;
+      const body = met.formatPoolList(pools);
+      const kb = new InlineKeyboard();
+      for (let i = 0; i < pools.length; i++) {
+        kb.text(`${i + 1}`, `pool:${pools[i].address}`).row();
+      }
+      kb.text("Back", "menu");
+      await ctx.reply(header + "\n" + body, { reply_markup: kb, parse_mode: "Markdown" });
+    } catch (e: any) {
+      await ctx.reply(`Error: ${e.message}`, { reply_markup: mainMenu() });
     }
     return;
   }
@@ -354,7 +387,8 @@ bot.callbackQuery("menu", async (ctx) => {
 bot.callbackQuery("poolinfo", async (ctx) => {
   if (!isAuthed(ctx.from!.id)) return;
   await ctx.answerCallbackQuery();
-  await ctx.editMessageText("Send pool address to view info.", { reply_markup: new InlineKeyboard().text("Back", "menu") });
+  awaitingPoolToken.add(ctx.from!.id);
+  await ctx.editMessageText("Send token contract address:");
 });
 
 bot.callbackQuery(/^bins:(.+)$/, async (ctx) => {
