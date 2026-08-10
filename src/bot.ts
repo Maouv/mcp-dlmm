@@ -22,7 +22,8 @@ function mainMenu(): InlineKeyboard {
   return new InlineKeyboard()
     .text("Pools", "pools").text("Positions", "positions").row()
     .text("Withdraw", "withdraw").text("Swap", "swap").row()
-    .text("Pool Info", "poolinfo").text("Set Wallet", "setwallet");
+    .text("Pool Info", "poolinfo").text("Wallet", "walletinfo").row()
+    .text("Set Wallet", "setwallet");
 }
 
 function fmtAddr(addr: string, len = 6): string {
@@ -73,6 +74,33 @@ bot.callbackQuery("setwallet", async (ctx) => {
   await ctx.answerCallbackQuery();
   awaitingWallet.add(ctx.from!.id);
   await ctx.editMessageText("Send private key. Message will be deleted after.");
+});
+
+bot.callbackQuery("walletinfo", async (ctx) => {
+  if (!isAuthed(ctx.from!.id)) return;
+  await ctx.answerCallbackQuery();
+  const wallet = getWallet();
+  if (!wallet) {
+    await ctx.editMessageText("No wallet set.", { reply_markup: new InlineKeyboard().text("Set Wallet", "setwallet").text("Back", "menu") });
+    return;
+  }
+  try {
+    const conn = getConnection();
+    const solBalance = await conn.getBalance(wallet.publicKey) / 1e9;
+    const tokenAccounts = await conn.getParsedTokenAccountsByOwner(wallet.publicKey, { programId: TOKEN_PROGRAM });
+    const tokens = tokenAccounts.value
+      .filter((t: any) => t.account.data.parsed.info.tokenAmount.uiAmount > 0)
+      .map((t: any) => {
+        const info = t.account.data.parsed.info;
+        return `${info.tokenAmount.uiAmount} ${fmtAddr(info.mint, 6)}`;
+      });
+    let msg = `Address: ${wallet.publicKey.toBase58()}\nSOL: ${solBalance.toFixed(4)}`;
+    if (tokens.length > 0) msg += `\n\nTokens:\n${tokens.join("\n")}`;
+    const kb = new InlineKeyboard().text("Back", "menu");
+    await ctx.editMessageText(msg, { reply_markup: kb });
+  } catch (e: any) {
+    await ctx.editMessageText(`Error: ${e.message}`, { reply_markup: mainMenu() });
+  }
 });
 
 bot.callbackQuery("pools", async (ctx) => {
