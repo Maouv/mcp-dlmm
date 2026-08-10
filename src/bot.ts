@@ -179,6 +179,33 @@ bot.callbackQuery(/^pool:(.+)$/, async (ctx) => {
   }
 });
 
+bot.callbackQuery("withdraw", async (ctx) => {
+  if (!isAuthed(ctx.from!.id)) return;
+  await ctx.answerCallbackQuery();
+  const wallet = getWallet();
+  if (!wallet) {
+    await ctx.editMessageText("No wallet. Use Set Wallet.", { reply_markup: mainMenu() });
+    return;
+  }
+  try {
+    const positions = await met.getUserPositions(wallet.publicKey.toBase58());
+    if (positions.length === 0) {
+      await ctx.editMessageText("No positions.", { reply_markup: mainMenu() });
+      return;
+    }
+    const kb = new InlineKeyboard();
+    for (const group of positions) {
+      for (const pos of group.positions) {
+        kb.text(`${fmtAddr(group.poolAddress)} [${pos.lowerBinId}-${pos.upperBinId}]`, `pos:${group.poolAddress}:${pos.address}`).row();
+      }
+    }
+    kb.text("Back", "menu");
+    await ctx.editMessageText("Select position to withdraw:", { reply_markup: kb });
+  } catch (e: any) {
+    await ctx.editMessageText(`Error: ${e.message}`, { reply_markup: mainMenu() });
+  }
+});
+
 bot.callbackQuery("positions", async (ctx) => {
   if (!isAuthed(ctx.from!.id)) return;
   await ctx.answerCallbackQuery();

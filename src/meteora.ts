@@ -20,7 +20,7 @@ export async function searchPools(query?: string, limit = 10) {
 }
 
 export async function searchPoolsByToken(tokenMint: string): Promise<any[]> {
-  const params = new URLSearchParams({ page: "1", page_size: "20", sort_by: "liquidity:desc", query: tokenMint });
+  const params = new URLSearchParams({ page: "1", page_size: "20", sort_by: "tvl:desc", query: tokenMint });
   const res = await fetch(`${DATAPI}/pools?${params}`);
   if (!res.ok) throw new Error(`Datapi error: ${res.status}`);
   const data: any = await res.json();
