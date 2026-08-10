@@ -4,7 +4,7 @@ import { PublicKey } from "@solana/web3.js";
 import { setWalletKey, getWallet, getConnection } from "./wallet";
 import * as met from "./meteora";
 import * as jup from "./jupiter";
-import { renderChartPNG, ChartParams, BinData, OHLCV } from "./chart";
+import { generateChart, ChartData } from "./chart";
 
 const bot = new Bot(process.env.BOT_TOKEN!);
 const PASSWORD = process.env.BOT_PASSWORD || "Freyana";
@@ -23,8 +23,9 @@ interface AddLPState {
   binStep: number;
   activeBinId: number;
   activePrice: number;
-  bins: BinData[];
-  ohlcv: OHLCV[];
+  basePrice: number;
+  bins: any[];
+  ohlcv: any[];
   minPct: number;
   maxPct: number;
   timeframe: string;
@@ -483,33 +484,26 @@ bot.callbackQuery(/^addlpchart:(.+)$/, async (ctx) => {
     const poolName = pool?.name || fmtAddr(poolAddr, 8);
     const binStep = pool?.pool_config?.bin_step || 1;
     const activePrice = pool?.current_price || 0;
-    const activeBin = await met.getActiveBin(poolAddr);
-    const rawBins = await met.getBinsAroundActive(poolAddr, 60, 60);
-    const bins: BinData[] = (rawBins as any[]).map((b: any) => ({
-      binId: b.binId,
-      price: b.price,
-      xAmount: parseFloat(b.xAmount) || 0,
-      yAmount: parseFloat(b.yAmount) || 0,
-    }));
+    const chartBins = await met.getBinsForChart(poolAddr, 60);
     const ohlcvRaw = await met.getPoolOhlcv(poolAddr, "1H", 48);
-    const ohlcv: OHLCV[] = ((ohlcvRaw as any)?.data || ohlcvRaw || []).map((c: any) => ({
-      timestamp: c.timestamp || 0,
-      open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume || 0,
-    })).filter((c: OHLCV) => c.open != null);
+    const ohlcv = ((ohlcvRaw as any)?.data || ohlcvRaw || []).map((c: any) => ({
+      t: c.timestamp || 0, o: c.open, h: c.high, l: c.low, c: c.close,
+    })).filter((c: any) => c.o != null);
 
     addLPStates.set(uid, {
       poolAddr, poolName, binStep,
-      activeBinId: activeBin.binId,
-      activePrice, bins, ohlcv,
+      activeBinId: chartBins.activeBinId,
+      activePrice, basePrice: chartBins.basePrice,
+      bins: chartBins.bins, ohlcv,
       minPct: -20, maxPct: 20, timeframe: "1H",
     });
 
     const state = addLPStates.get(uid)!;
-    const png = await renderChartPNG({
-      poolName: state.poolName, binStep: state.binStep,
-      activeBinId: state.activeBinId, activePrice: state.activePrice,
-      bins: state.bins, ohlcv: state.ohlcv,
-      minPct: state.minPct, maxPct: state.maxPct, timeframe: state.timeframe,
+    const png = await generateChart({
+      ohlcv: state.ohlcv, bins: state.bins,
+      activeBinId: state.activeBinId, binStep: state.binStep,
+      basePrice: state.basePrice, minPct: state.minPct, maxPct: state.maxPct,
+      poolName: state.poolName, timeframe: state.timeframe,
     });
 
     const kb = new InlineKeyboard()
@@ -543,11 +537,11 @@ bot.callbackQuery("addlprefresh", async (ctx) => {
   const state = addLPStates.get(uid);
   if (!state) return;
   try {
-    const png = await renderChartPNG({
-      poolName: state.poolName, binStep: state.binStep,
-      activeBinId: state.activeBinId, activePrice: state.activePrice,
-      bins: state.bins, ohlcv: state.ohlcv,
-      minPct: state.minPct, maxPct: state.maxPct, timeframe: state.timeframe,
+    const png = await generateChart({
+      ohlcv: state.ohlcv, bins: state.bins,
+      activeBinId: state.activeBinId, binStep: state.binStep,
+      basePrice: state.basePrice, minPct: state.minPct, maxPct: state.maxPct,
+      poolName: state.poolName, timeframe: state.timeframe,
     });
     const kb = new InlineKeyboard()
       .text("Reset", "addlpreset").text("Refresh", "addlprefresh").text("Timeframe", "addlptimeframe").row()
@@ -580,14 +574,13 @@ bot.callbackQuery(/^addlptf:(.+)$/, async (ctx) => {
   state.timeframe = tf;
   const ohlcvRaw = await met.getPoolOhlcv(state.poolAddr, tf, 48);
   state.ohlcv = ((ohlcvRaw as any)?.data || ohlcvRaw || []).map((c: any) => ({
-    timestamp: c.timestamp || 0,
-    open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume || 0,
-  })).filter((c: OHLCV) => c.open != null);
-  const png = await renderChartPNG({
-    poolName: state.poolName, binStep: state.binStep,
-    activeBinId: state.activeBinId, activePrice: state.activePrice,
-    bins: state.bins, ohlcv: state.ohlcv,
-    minPct: state.minPct, maxPct: state.maxPct, timeframe: state.timeframe,
+    t: c.timestamp || 0, o: c.open, h: c.high, l: c.low, c: c.close,
+  })).filter((c: any) => c.o != null);
+  const png = await generateChart({
+    ohlcv: state.ohlcv, bins: state.bins,
+    activeBinId: state.activeBinId, binStep: state.binStep,
+    basePrice: state.basePrice, minPct: state.minPct, maxPct: state.maxPct,
+    poolName: state.poolName, timeframe: state.timeframe,
   });
   const kb = new InlineKeyboard()
     .text("Reset", "addlpreset").text("Refresh", "addlprefresh").text("Timeframe", "addlptimeframe").row()

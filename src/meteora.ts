@@ -195,6 +195,23 @@ export async function getEmissionRate(poolAddress: string) {
   return dlmm.getEmissionRate();
 }
 
+export async function getBinsForChart(poolAddress: string, range = 100): Promise<{ bins: any[]; activeBinId: number; binStep: number; basePrice: number }> {
+  const { dlmm } = await getDlmm(poolAddress);
+  const activeBin: any = await dlmm.getActiveBin();
+  const activeBinId = activeBin.binId;
+  const binStep = dlmm.lbPair.binStep;
+  const basePrice = (dlmm.lbPair as any).pricePerToken || 1;
+  const rawBins: any = await dlmm.getBinsAroundActiveBin(range, range);
+  const bins: any[] = (rawBins.bins || rawBins).map((b: any) => ({
+    binId: b.binId,
+    price: b.price || basePrice * Math.pow(1 + binStep / 10000, b.binId),
+    xAmount: b.xAmount?.toString?.() || "0",
+    yAmount: b.yAmount?.toString?.() || "0",
+    liquidity: b.liquidity || b.reserveXAmount?.toNumber?.() || 0,
+  }));
+  return { bins, activeBinId, binStep, basePrice };
+}
+
 export async function getPoolOhlcv(poolAddress: string, type: string = "1H", limit: number = 100) {
   const res = await fetch(`${DATAPI}/pools/${poolAddress}/ohlcv?type=${type}&limit=${limit}`);
   return res.json();

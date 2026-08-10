@@ -1,163 +1,134 @@
 import sharp from "sharp";
 
-export interface BinData {
-  binId: number;
-  price: number;
-  xAmount: number;
-  yAmount: number;
-}
+const W = 800;
+const H = 500;
+const PAD = 40;
+const CHART_H = 280;
+const LIQ_H = 140;
+const LIQ_TOP = PAD + CHART_H + 20;
 
-export interface OHLCV {
-  timestamp: number;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume: number;
-}
-
-export interface ChartParams {
-  poolName: string;
-  binStep: number;
+export interface ChartData {
+  ohlcv: { t: number; o: number; h: number; l: number; c: number }[];
+  bins: { binId: number; price: number; xAmount: number; yAmount: number; liquidity: number }[];
   activeBinId: number;
-  activePrice: number;
-  bins: BinData[];
-  ohlcv: OHLCV[];
+  binStep: number;
+  basePrice: number;
   minPct: number;
   maxPct: number;
+  poolName: string;
   timeframe: string;
 }
 
-const W = 800;
-const H = 500;
-const PAD_L = 60;
-const PAD_R = 50;
-const PAD_T = 40;
-const PAD_B = 30;
-const CHART_H = 280;
-const LIQ_H = 140;
-const LIQ_Y = PAD_T + CHART_H + 20;
-
-function fmtPrice(p: number): string {
-  if (p >= 1) return p.toFixed(4);
-  if (p >= 0.01) return p.toFixed(5);
-  if (p >= 0.0001) return p.toFixed(7);
-  return p.toExponential(2);
+export async function generateChart(data: ChartData): Promise<Buffer> {
+  const svg = buildSVG(data);
+  return sharp(Buffer.from(svg)).png().toBuffer();
 }
 
-export function generateChartSVG(p: ChartParams): string {
-  const { bins, ohlcv, minPct, maxPct, activeBinId, activePrice, binStep, poolName, timeframe } = p;
+function buildSVG(d: ChartData): string {
+  const candles = d.ohlcv.slice(-60);
+  const prices = candles.flatMap(c => [c.h, c.l]);
+  let pMin = Math.min(...prices);
+  let pMax = Math.max(...prices);
+  const pRange = pMax - pMin || pMax * 0.01;
+  pMin -= pRange * 0.1;
+  pMax += pRange * 0.1;
 
-  const chartW = W - PAD_L - PAD_R;
-  const candleW = ohlcv.length > 0 ? Math.max(1, chartW / ohlcv.length * 0.7) : 1;
-  const step = ohlcv.length > 0 ? chartW / ohlcv.length : chartW;
+  const activePrice = d.basePrice * Math.pow(1 + d.binStep / 10000, d.activeBinId);
+  const minPrice = activePrice * (1 + d.minPct / 100);
+  const maxPrice = activePrice * (1 + d.maxPct / 100);
+  const allPrices = [...prices, activePrice, minPrice, maxPrice];
+  const cMin = Math.min(...allPrices);
+  const cMax = Math.max(...allPrices);
+  const cRange = cMax - cMin || cMax * 0.01;
 
-  const allPrices = ohlcv.flatMap(c => [c.high, c.low]);
-  if (activePrice > 0) allPrices.push(activePrice);
-  const minPrice = Math.min(...allPrices) * 0.95;
-  const maxPrice = Math.max(...allPrices) * 1.05;
-  const priceRange = maxPrice - minPrice || 1;
+  const xScale = (i: number) => PAD + (i / (candles.length - 1)) * (W - 2 * PAD);
+  const yScale = (p: number) => PAD + (1 - (p - cMin) / cRange) * CHART_H;
+  const liqScale = (liq: number, maxLiq: number) => LIQ_TOP + (1 - liq / maxLiq) * LIQ_H;
 
-  const maxLiq = Math.max(...bins.map(b => b.xAmount + b.yAmount), 1);
-  const binStepX = bins.length > 0 ? chartW / bins.length : chartW;
-  const barW = Math.max(1, binStepX * 0.7);
+  let parts: string[] = [];
 
-  const minPriceLine = activePrice * (1 + minPct / 100);
-  const maxPriceLine = activePrice * (1 + maxPct / 100);
+  parts.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" style="background:#0d1117">`);
 
-  const priceToY = (price: number) => PAD_T + CHART_H - ((price - minPrice) / priceRange) * CHART_H;
-
-  const liqMinY = LIQ_Y;
-  const liqMaxY = LIQ_Y + LIQ_H;
-
-  let svg = `<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg" style="background:#0d1117">`;
-
-  svg += `<rect width="${W}" height="${H}" fill="#0d1117"/>`;
-
-  svg += `<text x="${PAD_L}" y="22" fill="#c9d1d9" font-size="14" font-family="monospace" font-weight="bold">${poolName}</text>`;
-  svg += `<text x="${W - PAD_R}" y="22" fill="#8b949e" font-size="11" font-family="monospace" text-anchor="end">${timeframe}</text>`;
+  parts.push(`<text x="${PAD}" y="22" fill="#c9d1d9" font-size="14" font-family="monospace">${escapeXml(d.poolName)}</text>`);
+  parts.push(`<text x="${W - PAD}" y="22" fill="#8b949e" font-size="11" font-family="monospace" text-anchor="end">${d.timeframe}</text>`);
 
   for (let i = 0; i <= 4; i++) {
-    const y = PAD_T + (CHART_H / 4) * i;
-    const price = maxPrice - (priceRange / 4) * i;
-    svg += `<line x1="${PAD_L}" y1="${y}" x2="${W - PAD_R}" y2="${y}" stroke="#21262d" stroke-width="0.5"/>`;
-    svg += `<text x="${PAD_L - 5}" y="${y + 3}" fill="#8b949e" font-size="9" font-family="monospace" text-anchor="end">${fmtPrice(price)}</text>`;
+    const y = PAD + (i / 4) * CHART_H;
+    const p = cMax - (i / 4) * cRange;
+    parts.push(`<line x1="${PAD}" y1="${y}" x2="${W - PAD}" y2="${y}" stroke="#1e2530" stroke-width="0.5"/>`);
+    parts.push(`<text x="${PAD - 5}" y="${y + 4}" fill="#8b949e" font-size="9" font-family="monospace" text-anchor="end">${fmtPrice(p)}</text>`);
   }
 
-  if (minPriceLine >= minPrice && minPriceLine <= maxPrice) {
-    const y = priceToY(minPriceLine);
-    svg += `<line x1="${PAD_L}" y1="${y}" x2="${W - PAD_R}" y2="${y}" stroke="#f85149" stroke-width="1" stroke-dasharray="4 2"/>`;
-    svg += `<text x="${W - PAD_R + 3}" y="${y + 3}" fill="#f85149" font-size="9" font-family="monospace">${minPct}%</text>`;
-  }
-  if (maxPriceLine >= minPrice && maxPriceLine <= maxPrice) {
-    const y = priceToY(maxPriceLine);
-    svg += `<line x1="${PAD_L}" y1="${y}" x2="${W - PAD_R}" y2="${y}" stroke="#3fb950" stroke-width="1" stroke-dasharray="4 2"/>`;
-    svg += `<text x="${W - PAD_R + 3}" y="${y + 3}" fill="#3fb950" font-size="9" font-family="monospace">${maxPct}%</text>`;
-  }
-
-  if (activePrice >= minPrice && activePrice <= maxPrice) {
-    const y = priceToY(activePrice);
-    svg += `<line x1="${PAD_L}" y1="${y}" x2="${W - PAD_R}" y2="${y}" stroke="#ffd33d" stroke-width="1" stroke-dasharray="2 2"/>`;
-    svg += `<text x="${W - PAD_R + 3}" y="${y - 3}" fill="#ffd33d" font-size="9" font-family="monospace">act</text>`;
-  }
-
-  ohlcv.forEach((c, i) => {
-    const x = PAD_L + i * step + step / 2;
-    const isUp = c.close >= c.open;
-    const color = isUp ? "#26a4c4" : "#f85149";
-    const yHigh = priceToY(c.high);
-    const yLow = priceToY(c.low);
-    const yOpen = priceToY(c.open);
-    const yClose = priceToY(c.close);
-    const bodyTop = Math.min(yOpen, yClose);
-    const bodyH = Math.max(1, Math.abs(yClose - yOpen));
-    svg += `<line x1="${x}" y1="${yHigh}" x2="${x}" y2="${yLow}" stroke="${color}" stroke-width="0.8"/>`;
-    svg += `<rect x="${x - candleW / 2}" y="${bodyTop}" width="${candleW}" height="${bodyH}" fill="${color}" opacity="0.8"/>`;
+  candles.forEach((c, i) => {
+    const x = xScale(i);
+    const color = c.c >= c.o ? "#26a69a" : "#ef5350";
+    const w = Math.max(1, (W - 2 * PAD) / candles.length * 0.7);
+    const yO = yScale(c.o);
+    const yC = yScale(c.c);
+    parts.push(`<line x1="${x}" y1="${yScale(c.h)}" x2="${x}" y2="${yScale(c.l)}" stroke="${color}" stroke-width="1"/>`);
+    parts.push(`<rect x="${x - w/2}" y="${Math.min(yO, yC)}" width="${w}" height="${Math.abs(yC - yO) || 1}" fill="${color}"/>`);
   });
 
-  svg += `<line x1="${PAD_L}" y1="${liqMinY - 10}" x2="${W - PAD_R}" y2="${liqMinY - 10}" stroke="#21262d" stroke-width="0.5"/>`;
-  svg += `<text x="${PAD_L}" y="${liqMinY - 3}" fill="#8b949e" font-size="9" font-family="monospace">Liquidity</text>`;
+  const bins = d.bins;
+  const maxLiq = Math.max(...bins.map(b => b.liquidity || 0), 1);
+  const liqW = (W - 2 * PAD) / bins.length;
+  const activeIdx = bins.findIndex(b => b.binId === d.activeBinId);
+
+  parts.push(`<line x1="${PAD}" y1="${LIQ_TOP}" x2="${W - PAD}" y2="${LIQ_TOP}" stroke="#1e2530" stroke-width="0.5"/>`);
 
   bins.forEach((b, i) => {
-    const x = PAD_L + i * binStepX + binStepX / 2;
-    const liq = b.xAmount + b.yAmount;
-    const h = (liq / maxLiq) * LIQ_H;
-    const y = liqMaxY - h;
-    const isActive = b.binId === activeBinId;
-    const inRange = b.price >= minPriceLine && b.price <= maxPriceLine;
-    let color = "#30363d";
-    if (isActive) color = "#ffd33d";
-    else if (inRange) color = "#3fb950";
-    svg += `<rect x="${x - barW / 2}" y="${y}" width="${barW}" height="${h}" fill="${color}" opacity="0.7"/>`;
+    const x = PAD + i * liqW;
+    const h = (b.liquidity || 0) / maxLiq * LIQ_H;
+    const y = LIQ_TOP + LIQ_H - h;
+    const isActive = b.binId === d.activeBinId;
+    parts.push(`<rect x="${x}" y="${y}" width="${Math.max(1, liqW - 0.5)}" height="${h}" fill="${isActive ? "#f0b90b" : "#3a4a5a"}"/>`);
   });
 
-  const minBinIdx = bins.findIndex(b => b.price >= minPriceLine);
-  const maxBinIdx = bins.findIndex(b => b.price >= maxPriceLine);
-  if (minBinIdx >= 0 && maxBinIdx >= 0 && maxBinIdx >= minBinIdx) {
-    const x1 = PAD_L + minBinIdx * binStepX;
-    const x2 = PAD_L + (maxBinIdx + 1) * binStepX;
-    svg += `<rect x="${x1}" y="${liqMinY}" width="${x2 - x1}" height="${LIQ_H}" fill="#3fb950" opacity="0.08"/>`;
-    svg += `<line x1="${x1}" y1="${liqMinY}" x2="${x1}" y2="${liqMaxY}" stroke="#3fb950" stroke-width="0.5" opacity="0.5"/>`;
-    svg += `<line x1="${x2}" y1="${liqMinY}" x2="${x2}" y2="${liqMaxY}" stroke="#3fb950" stroke-width="0.5" opacity="0.5"/>`;
+  if (activeIdx >= 0) {
+    const ax = PAD + activeIdx * liqW + liqW / 2;
+    parts.push(`<line x1="${ax}" y1="${PAD}" x2="${ax}" y2="${LIQ_TOP + LIQ_H}" stroke="#f0b90b" stroke-width="1" stroke-dasharray="3,2"/>`);
+    parts.push(`<text x="${ax + 3}" y="${PAD + 12}" fill="#f0b90b" font-size="9" font-family="monospace">active</text>`);
   }
 
-  svg += `<line x1="${PAD_L}" y1="${liqMaxY}" x2="${W - PAD_R}" y2="${liqMaxY}" stroke="#30363d" stroke-width="0.5"/>`;
-  const labelBins = [0, Math.floor(bins.length / 2), bins.length - 1];
-  labelBins.forEach(i => {
-    if (i < bins.length) {
-      const x = PAD_L + i * binStepX + binStepX / 2;
-      svg += `<text x="${x}" y="${liqMaxY + 15}" fill="#8b949e" font-size="8" font-family="monospace" text-anchor="middle">${bins[i].binId}</text>`;
-    }
-  });
+  const minIdx = findBinIdx(bins, d.minPct, d.activeBinId, d.binStep, d.basePrice, true);
+  const maxIdx = findBinIdx(bins, d.maxPct, d.activeBinId, d.binStep, d.basePrice, false);
 
-  svg += `<text x="${PAD_L}" y="${H - 5}" fill="#8b949e" font-size="9" font-family="monospace">Bin</text>`;
-  svg += `<text x="${W - PAD_R}" y="${H - 5}" fill="#8b949e" font-size="9" font-family="monospace" text-anchor="end">Step ${binStep}</text>`;
+  if (minIdx >= 0) {
+    const x = PAD + minIdx * liqW + liqW / 2;
+    parts.push(`<line x1="${x}" y1="${PAD}" x2="${x}" y2="${LIQ_TOP + LIQ_H}" stroke="#e74c3c" stroke-width="1.5" stroke-dasharray="4,2"/>`);
+    parts.push(`<text x="${x + 3}" y="${PAD + 24}" fill="#e74c3c" font-size="9" font-family="monospace">min ${d.minPct}%</text>`);
+  }
+  if (maxIdx >= 0) {
+    const x = PAD + maxIdx * liqW + liqW / 2;
+    parts.push(`<line x1="${x}" y1="${PAD}" x2="${x}" y2="${LIQ_TOP + LIQ_H}" stroke="#2ecc71" stroke-width="1.5" stroke-dasharray="4,2"/>`);
+    parts.push(`<text x="${x + 3}" y="${PAD + 36}" fill="#2ecc71" font-size="9" font-family="monospace">max ${d.maxPct}%</text>`);
+  }
 
-  svg += `</svg>`;
-  return svg;
+  parts.push(`<rect x="${PAD}" y="${PAD}" width="${W - 2 * PAD}" height="${LIQ_TOP + LIQ_H - PAD}" fill="none" stroke="#1e2530" stroke-width="1"/>`);
+
+  parts.push(`</svg>`);
+  return parts.join("");
 }
 
-export async function renderChartPNG(p: ChartParams): Promise<Buffer> {
-  const svg = generateChartSVG(p);
-  return sharp(Buffer.from(svg)).png().toBuffer();
+function findBinIdx(bins: any[], pct: number, activeBinId: number, binStep: number, basePrice: number, isMin: boolean): number {
+  const activePrice = basePrice * Math.pow(1 + binStep / 10000, activeBinId);
+  const targetPrice = activePrice * (1 + pct / 100);
+  let targetBinId = activeBinId;
+  if (targetPrice > activePrice) {
+    while (basePrice * Math.pow(1 + binStep / 10000, targetBinId) < targetPrice) targetBinId++;
+  } else {
+    while (basePrice * Math.pow(1 + binStep / 10000, targetBinId) > targetPrice) targetBinId--;
+  }
+  return bins.findIndex(b => b.binId === targetBinId);
+}
+
+function fmtPrice(p: number): string {
+  if (p < 0.001) return p.toExponential(2);
+  if (p < 1) return p.toFixed(6);
+  if (p < 100) return p.toFixed(4);
+  return p.toFixed(2);
+}
+
+function escapeXml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
