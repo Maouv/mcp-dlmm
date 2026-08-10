@@ -22,7 +22,7 @@ function mainMenu(): InlineKeyboard {
   return new InlineKeyboard()
     .text("Pools", "pools").text("Positions", "positions").row()
     .text("Withdraw", "withdraw").text("Swap", "swap").row()
-    .text("Pool Info", "poolinfo").text("Stats", "stats");
+    .text("Pool Info", "poolinfo").text("Set Wallet", "setwallet");
 }
 
 function fmtAddr(addr: string, len = 6): string {
@@ -68,10 +68,11 @@ bot.on("message:text", async (ctx) => {
   }
 });
 
-bot.command("setwallet", async (ctx) => {
-  if (!isAuthed(ctx.from!.id)) { await ctx.reply("Auth first: /start"); return; }
+bot.callbackQuery("setwallet", async (ctx) => {
+  if (!isAuthed(ctx.from!.id)) return;
+  await ctx.answerCallbackQuery();
   awaitingWallet.add(ctx.from!.id);
-  await ctx.reply("Send private key. Message will be deleted.");
+  await ctx.editMessageText("Send private key. Message will be deleted after.");
 });
 
 bot.callbackQuery("pools", async (ctx) => {
@@ -322,16 +323,10 @@ bot.callbackQuery("menu", async (ctx) => {
   await ctx.editMessageText("Menu:", { reply_markup: mainMenu() });
 });
 
-bot.callbackQuery("stats", async (ctx) => {
+bot.callbackQuery("poolinfo", async (ctx) => {
   if (!isAuthed(ctx.from!.id)) return;
   await ctx.answerCallbackQuery();
-  try {
-    const stats = await met.getProtocolStats();
-    const kb = new InlineKeyboard().text("Back", "menu");
-    await ctx.editMessageText(`Stats:\n${JSON.stringify(stats, null, 2).slice(0, 4000)}`, { reply_markup: kb });
-  } catch (e: any) {
-    await ctx.editMessageText(`Error: ${e.message}`, { reply_markup: mainMenu() });
-  }
+  await ctx.editMessageText("Send pool address to view info.", { reply_markup: new InlineKeyboard().text("Back", "menu") });
 });
 
 bot.callbackQuery(/^bins:(.+)$/, async (ctx) => {

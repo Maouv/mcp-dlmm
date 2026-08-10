@@ -167,11 +167,6 @@ export async function getEmissionRate(poolAddress: string) {
   return dlmm.getEmissionRate();
 }
 
-export async function getProtocolStats() {
-  const res = await fetch(`${DATAPI}/stats`);
-  return res.json();
-}
-
 export async function getPoolOhlcv(poolAddress: string, type: string = "1H", limit: number = 100) {
   const res = await fetch(`${DATAPI}/pools/${poolAddress}/ohlcv?type=${type}&limit=${limit}`);
   return res.json();
